@@ -1,0 +1,141 @@
+// =====================================================
+// Seasonal NDVI Analysis (1988–1994) - Landsat 5 TM
+// =====================================================
+
+// Study Area
+var geometry = aoi;
+
+// ------------------------------
+// 1. Preprocessing (Scaling + QA Mask)
+// ------------------------------
+function preprocessL5(image) {
+  // Scale reflectance
+  var optical = image.select('SR_B.')
+    .multiply(0.0000275)
+    .add(-0.2);
+
+  // QA mask
+  var qa = image.select('QA_PIXEL');
+  var cloud = 1 << 3;
+  var shadow = 1 << 4;
+
+  var mask = qa.bitwiseAnd(cloud).eq(0)
+    .and(qa.bitwiseAnd(shadow).eq(0));
+
+  return image.addBands(optical, null, true)
+    .updateMask(mask)
+    .copyProperties(image, ['system:time_start']);
+}
+
+// ------------------------------
+// 2. NDVI Calculation
+// ------------------------------
+function addNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B4', 'SR_B3'])
+    .rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// ------------------------------
+// 3. Load Data
+// ------------------------------
+var l5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+  .filterDate('1988-01-01', '1994-12-31')
+  .filterBounds(geometry)
+  .map(preprocessL5)
+  .map(addNDVI)
+  .select('NDVI');
+
+// ------------------------------
+// 4. Seasons
+// ------------------------------
+var seasons = [
+  {name: 'Winter', start: '01-01', end: '02-28'},
+  {name: 'PreMonsoon', start: '03-01', end: '05-31'},
+  {name: 'Monsoon', start: '06-01', end: '09-30'},
+  {name: 'PostMonsoon', start: '10-01', end: '12-31'}
+];
+
+var years = ee.List.sequence(1988, 1994);
+
+// ------------------------------
+// 5. Seasonal Stats
+// ------------------------------
+var seasonalFeatures = years.map(function(y) {
+  y = ee.Number(y);
+
+  return ee.List(seasons.map(function(sDict) {
+    var s = ee.Dictionary(sDict);
+
+    var startParts = ee.String(s.get('start')).split('-');
+    var endParts = ee.String(s.get('end')).split('-');
+
+    var startDate = ee.Date.fromYMD(y,
+      ee.Number.parse(startParts.get(0)),
+      ee.Number.parse(startParts.get(1))
+    );
+
+    var endDate = ee.Date.fromYMD(y,
+      ee.Number.parse(endParts.get(0)),
+      ee.Number.parse(endParts.get(1))
+    ).advance(1, 'day');
+
+    var seasonal = l5.filterDate(startDate, endDate);
+
+    var count = seasonal.size();
+
+    var meanNDVI = ee.Algorithms.If(count.gt(0),
+      seasonal.mean()
+        .reduceRegion({
+          reducer: ee.Reducer.mean(),
+          geometry: geometry,
+          scale: 30,
+          maxPixels: 1e13
+        }).get('NDVI'),
+      null
+    );
+
+    return ee.Feature(null, {
+      'Year': y,
+      'Season': s.get('name'),
+      'Mean_NDVI': meanNDVI
+    });
+  }));
+}).flatten();
+
+// ------------------------------
+// 6. FeatureCollection
+// ------------------------------
+var seasonalNDVI = ee.FeatureCollection(seasonalFeatures)
+  .filter(ee.Filter.notNull(['Mean_NDVI']));
+
+print('Seasonal NDVI', seasonalNDVI.limit(10));
+
+// ------------------------------
+// 7. Chart (Line)
+// ------------------------------
+var lineChart = ui.Chart.feature.groups({
+  features: seasonalNDVI,
+  xProperty: 'Season',
+  yProperty: 'Mean_NDVI',
+  seriesProperty: 'Year'
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Seasonal NDVI (1988–1994)',
+    hAxis: {title: 'Season'},
+    vAxis: {title: 'Mean NDVI'},
+    pointSize: 4,
+    lineWidth: 2
+  });
+
+print(lineChart);
+
+// ------------------------------
+// 8. Export
+// ------------------------------
+Export.table.toDrive({
+  collection: seasonalNDVI,
+  description: 'Seasonal_NDVI_1988_1994_L5',
+  folder: 'GEE_Exports',
+  fileFormat: 'CSV'
+});

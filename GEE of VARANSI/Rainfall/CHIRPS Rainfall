@@ -1,0 +1,103 @@
+// =====================================================
+// Seasonal CHIRPS Rainfall (1981–2024)
+// =====================================================
+
+// Study Area
+var geometry = aoi;
+
+// ------------------------------
+// 1. Load CHIRPS Daily
+// ------------------------------
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterBounds(geometry)
+  .filterDate('1981-01-01', '2024-12-31');
+
+// ------------------------------
+// 2. Define Seasons
+// ------------------------------
+var seasons = [
+  {name: 'Winter', start: '01-01', end: '02-28'},
+  {name: 'PreMonsoon', start: '03-01', end: '05-31'},
+  {name: 'Monsoon', start: '06-01', end: '09-30'},
+  {name: 'PostMonsoon', start: '10-01', end: '12-31'}
+];
+
+var years = ee.List.sequence(1981, 2024);
+
+// ------------------------------
+// 3. Seasonal Rainfall Calculation
+// ------------------------------
+var seasonalFeatures = years.map(function(y) {
+  y = ee.Number(y);
+
+  return ee.List(seasons.map(function(sDict) {
+    var s = ee.Dictionary(sDict);
+
+    var startParts = ee.String(s.get('start')).split('-');
+    var endParts = ee.String(s.get('end')).split('-');
+
+    var startDate = ee.Date.fromYMD(
+      y,
+      ee.Number.parse(startParts.get(0)),
+      ee.Number.parse(startParts.get(1))
+    );
+
+    var endDate = ee.Date.fromYMD(
+      y,
+      ee.Number.parse(endParts.get(0)),
+      ee.Number.parse(endParts.get(1))
+    ).advance(1, 'day');
+
+    var seasonal = chirps.filterDate(startDate, endDate);
+
+    var totalRain = seasonal.sum().reduceRegion({
+      reducer: ee.Reducer.mean(), // mean over AOI
+      geometry: geometry,
+      scale: 5566,
+      maxPixels: 1e13
+    }).get('precipitation');
+
+    return ee.Feature(null, {
+      'Year': y,
+      'Season': s.get('name'),
+      'Rainfall_mm': totalRain
+    });
+  }));
+}).flatten();
+
+// ------------------------------
+// 4. FeatureCollection
+// ------------------------------
+var seasonalRainfall = ee.FeatureCollection(seasonalFeatures)
+  .filter(ee.Filter.notNull(['Rainfall_mm']));
+
+print('Seasonal Rainfall', seasonalRainfall.limit(10));
+
+// ------------------------------
+// 5. Chart (Line)
+// ------------------------------
+var rainfallChart = ui.Chart.feature.groups({
+  features: seasonalRainfall,
+  xProperty: 'Season',
+  yProperty: 'Rainfall_mm',
+  seriesProperty: 'Year'
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Seasonal CHIRPS Rainfall (1981–2024)',
+    hAxis: {title: 'Season'},
+    vAxis: {title: 'Rainfall (mm)'},
+    pointSize: 3,
+    lineWidth: 1
+  });
+
+print(rainfallChart);
+
+// ------------------------------
+// 6. Export
+// ------------------------------
+Export.table.toDrive({
+  collection: seasonalRainfall,
+  description: 'Seasonal_CHIRPS_Rainfall_1981_2024',
+  folder: 'GEE_Exports',
+  fileFormat: 'CSV'
+});

@@ -1,0 +1,153 @@
+// =====================================================
+// Seasonal NDVI Analysis (2014–2025)
+// Landsat 8 + Landsat 9
+// =====================================================
+
+// Study Area
+var geometry = aoi;
+
+// ------------------------------
+// 1. Preprocessing (Scaling + QA Mask)
+// ------------------------------
+function preprocessL89(image) {
+  // Apply scale factor
+  var optical = image.select('SR_B.')
+    .multiply(0.0000275)
+    .add(-0.2);
+
+  // QA masking
+  var qa = image.select('QA_PIXEL');
+  var cloud = 1 << 3;
+  var shadow = 1 << 4;
+  var cirrus = 1 << 2;
+
+  var mask = qa.bitwiseAnd(cloud).eq(0)
+    .and(qa.bitwiseAnd(shadow).eq(0))
+    .and(qa.bitwiseAnd(cirrus).eq(0));
+
+  return image.addBands(optical, null, true)
+    .updateMask(mask)
+    .copyProperties(image, ['system:time_start']);
+}
+
+// ------------------------------
+// 2. NDVI Calculation
+// ------------------------------
+function addNDVI(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']) // NIR, Red
+    .rename('NDVI');
+  return image.addBands(ndvi);
+}
+
+// ------------------------------
+// 3. Load Landsat 8 & 9
+// ------------------------------
+var l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(geometry)
+  .filterDate('2014-01-01', '2025-12-31');
+
+var l9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
+  .filterBounds(geometry)
+  .filterDate('2021-01-01', '2025-12-31');
+
+// Merge collections
+var l89 = l8.merge(l9)
+  .map(preprocessL89)
+  .map(addNDVI)
+  .select('NDVI');
+
+// ------------------------------
+// 4. Seasons
+// ------------------------------
+var seasons = [
+  {name: 'Winter', start: '01-01', end: '02-28'},
+  {name: 'PreMonsoon', start: '03-01', end: '05-31'},
+  {name: 'Monsoon', start: '06-01', end: '09-30'},
+  {name: 'PostMonsoon', start: '10-01', end: '12-31'}
+];
+
+var years = ee.List.sequence(2014, 2025);
+
+// ------------------------------
+// 5. Seasonal NDVI Stats
+// ------------------------------
+var seasonalFeatures = years.map(function(y) {
+  y = ee.Number(y);
+
+  return ee.List(seasons.map(function(sDict) {
+    var s = ee.Dictionary(sDict);
+
+    var startParts = ee.String(s.get('start')).split('-');
+    var endParts = ee.String(s.get('end')).split('-');
+
+    var startDate = ee.Date.fromYMD(
+      y,
+      ee.Number.parse(startParts.get(0)),
+      ee.Number.parse(startParts.get(1))
+    );
+
+    var endDate = ee.Date.fromYMD(
+      y,
+      ee.Number.parse(endParts.get(0)),
+      ee.Number.parse(endParts.get(1))
+    ).advance(1, 'day');
+
+    var seasonal = l89.filterDate(startDate, endDate);
+
+    var count = seasonal.size();
+
+    var meanNDVI = ee.Algorithms.If(count.gt(0),
+      seasonal.mean().reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: geometry,
+        scale: 30,
+        maxPixels: 1e13
+      }).get('NDVI'),
+      null
+    );
+
+    return ee.Feature(null, {
+      'Year': y,
+      'Season': s.get('name'),
+      'Mean_NDVI': meanNDVI
+    });
+  }));
+}).flatten();
+
+// ------------------------------
+// 6. FeatureCollection
+// ------------------------------
+var seasonalNDVI = ee.FeatureCollection(seasonalFeatures)
+  .filter(ee.Filter.notNull(['Mean_NDVI']));
+
+print('Seasonal NDVI (2014–2025)', seasonalNDVI.limit(10));
+
+// ------------------------------
+// 7. Chart
+// ------------------------------
+var chart = ui.Chart.feature.groups({
+  features: seasonalNDVI,
+  xProperty: 'Season',
+  yProperty: 'Mean_NDVI',
+  seriesProperty: 'Year'
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Seasonal NDVI (2014–2025, Landsat 8 & 9)',
+    hAxis: {title: 'Season'},
+    vAxis: {title: 'Mean NDVI'},
+    pointSize: 4,
+    lineWidth: 2,
+    legend: {position: 'right'}
+  });
+
+print(chart);
+
+// ------------------------------
+// 8. Export
+// ------------------------------
+Export.table.toDrive({
+  collection: seasonalNDVI,
+  description: 'Seasonal_NDVI_2014_2025_L89',
+  folder: 'GEE_Exports',
+  fileFormat: 'CSV'
+});

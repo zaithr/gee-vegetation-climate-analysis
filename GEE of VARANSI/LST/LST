@@ -1,0 +1,128 @@
+// =====================================================
+// Annual LST Analysis (1984–2024)
+// Landsat (L2) + MODIS
+// =====================================================
+
+// Study Area
+var geometry = aoi;
+
+// ------------------------------
+// 1. Landsat LST (Correct Source)
+// ------------------------------
+function calculateLST_Landsat(image) {
+  var lst = image.select('ST_B6') // L5 & L7
+    .multiply(0.00341802)
+    .add(149.0)
+    .subtract(273.15)
+    .rename('LST');
+
+  return lst.copyProperties(image, ['system:time_start']);
+}
+
+// ------------------------------
+// 2. Annual Landsat LST (1984–1999)
+// ------------------------------
+function getAnnualLST_Landsat(startYear, endYear) {
+  var years = ee.List.sequence(startYear, endYear);
+
+  return ee.FeatureCollection(years.map(function(year) {
+    var start = ee.Date.fromYMD(year, 1, 1);
+    var end = start.advance(1, 'year');
+
+    var l5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+      .filterDate(start, end)
+      .filterBounds(geometry)
+      .map(calculateLST_Landsat);
+
+    var l7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+      .filterDate(start, end)
+      .filterBounds(geometry)
+      .map(calculateLST_Landsat);
+
+    var combined = l5.merge(l7);
+
+    var meanLST = combined.mean().reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: geometry,
+      scale: 30,
+      maxPixels: 1e13
+    }).get('LST');
+
+    return ee.Feature(null, {
+      'Year': year,
+      'LST_C': meanLST
+    });
+  }));
+}
+
+// ------------------------------
+// 3. MODIS LST (2000–2024)
+// ------------------------------
+function getAnnualLST_MODIS(startYear, endYear) {
+  var years = ee.List.sequence(startYear, endYear);
+
+  return ee.FeatureCollection(years.map(function(year) {
+    var start = ee.Date.fromYMD(year, 1, 1);
+    var end = start.advance(1, 'year');
+
+    var modis = ee.ImageCollection('MODIS/061/MOD11A1')
+      .filterDate(start, end)
+      .filterBounds(geometry)
+      .select('LST_Day_1km')
+      .map(function(img) {
+        return img.multiply(0.02)
+          .subtract(273.15)
+          .rename('LST')
+          .copyProperties(img, ['system:time_start']);
+      });
+
+    var meanLST = modis.mean().reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: geometry,
+      scale: 1000,
+      maxPixels: 1e13
+    }).get('LST');
+
+    return ee.Feature(null, {
+      'Year': year,
+      'LST_C': meanLST
+    });
+  }));
+}
+
+// ------------------------------
+// 4. Combine Time Series
+// ------------------------------
+var lstLandsat = getAnnualLST_Landsat(1984, 1999);
+var lstMODIS = getAnnualLST_MODIS(2000, 2024);
+
+var lstCombined = lstLandsat
+  .merge(lstMODIS)
+  .filter(ee.Filter.notNull(['LST_C']));
+
+print('LST Combined', lstCombined.limit(10));
+
+// ------------------------------
+// 5. Chart
+// ------------------------------
+var chart = ui.Chart.feature.byFeature(lstCombined, 'Year', 'LST_C')
+  .setChartType('LineChart')
+  .setOptions({
+    title: 'Annual Mean Land Surface Temperature (1984–2024)',
+    hAxis: {title: 'Year'},
+    vAxis: {title: 'LST (°C)'},
+    lineWidth: 2,
+    pointSize: 4
+  });
+
+print(chart);
+
+// ------------------------------
+// 6. Export
+// ------------------------------
+Export.table.toDrive({
+  collection: lstCombined,
+  description: 'Annual_LST_1984_2024',
+  folder: 'GEE_Exports',
+  fileFormat: 'CSV'
+});

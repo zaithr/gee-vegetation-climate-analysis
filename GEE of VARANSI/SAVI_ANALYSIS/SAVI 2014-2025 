@@ -1,0 +1,165 @@
+// =====================================================
+// Seasonal SAVI Analysis (2014–2024)
+// Landsat 8 + Landsat 9
+// =====================================================
+
+// Study Area
+var geometry = aoi;
+
+// ------------------------------
+// 1. Preprocessing (Scaling + QA Mask)
+// ------------------------------
+function preprocessL89(image) {
+  var optical = image.select('SR_B.')
+    .multiply(0.0000275)
+    .add(-0.2);
+
+  var qa = image.select('QA_PIXEL');
+  var cloud = 1 << 3;
+  var shadow = 1 << 4;
+  var cirrus = 1 << 2;
+
+  var mask = qa.bitwiseAnd(cloud).eq(0)
+    .and(qa.bitwiseAnd(shadow).eq(0))
+    .and(qa.bitwiseAnd(cirrus).eq(0));
+
+  return image.addBands(optical, null, true)
+    .updateMask(mask)
+    .copyProperties(image, ['system:time_start']);
+}
+
+// ------------------------------
+// 2. SAVI Calculation
+// ------------------------------
+function addSAVI(image) {
+  var nir = image.select('SR_B5');
+  var red = image.select('SR_B4');
+  var L = 0.5;
+
+  var savi = nir.subtract(red)
+    .divide(nir.add(red).add(L))
+    .multiply(1 + L)
+    .rename('SAVI');
+
+  return image.addBands(savi);
+}
+
+// ------------------------------
+// 3. Load Landsat 8 & 9
+// ------------------------------
+var l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterBounds(geometry)
+  .filterDate('2014-01-01', '2024-12-31');
+
+var l9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
+  .filterBounds(geometry)
+  .filterDate('2021-01-01', '2024-12-31');
+
+// Merge collections
+var l89 = l8.merge(l9)
+  .map(preprocessL89)
+  .map(addSAVI)
+  .select('SAVI');
+
+// ------------------------------
+// 4. Apply Threshold (IMPORTANT)
+// ------------------------------
+var saviFiltered = l89.map(function(img) {
+  return img.updateMask(img.gte(0.23));
+});
+
+// ------------------------------
+// 5. Seasons
+// ------------------------------
+var seasons = [
+  {name: 'Winter', start: '01-01', end: '02-28'},
+  {name: 'PreMonsoon', start: '03-01', end: '05-31'},
+  {name: 'Monsoon', start: '06-01', end: '09-30'},
+  {name: 'PostMonsoon', start: '10-01', end: '12-31'}
+];
+
+var years = ee.List.sequence(2014, 2024);
+
+// ------------------------------
+// 6. Seasonal SAVI Stats
+// ------------------------------
+var seasonalFeatures = years.map(function(y) {
+  y = ee.Number(y);
+
+  return ee.List(seasons.map(function(sDict) {
+    var s = ee.Dictionary(sDict);
+
+    var startParts = ee.String(s.get('start')).split('-');
+    var endParts = ee.String(s.get('end')).split('-');
+
+    var startDate = ee.Date.fromYMD(
+      y,
+      ee.Number.parse(startParts.get(0)),
+      ee.Number.parse(startParts.get(1))
+    );
+
+    var endDate = ee.Date.fromYMD(
+      y,
+      ee.Number.parse(endParts.get(0)),
+      ee.Number.parse(endParts.get(1))
+    ).advance(1, 'day');
+
+    var seasonal = saviFiltered.filterDate(startDate, endDate);
+
+    var count = seasonal.size();
+
+    var meanSAVI = ee.Algorithms.If(count.gt(0),
+      seasonal.mean().reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: geometry,
+        scale: 30,
+        maxPixels: 1e13
+      }).get('SAVI'),
+      null
+    );
+
+    return ee.Feature(null, {
+      'Year': y,
+      'Season': s.get('name'),
+      'Mean_SAVI': meanSAVI
+    });
+  }));
+}).flatten();
+
+// ------------------------------
+// 7. FeatureCollection
+// ------------------------------
+var seasonalSAVI = ee.FeatureCollection(seasonalFeatures)
+  .filter(ee.Filter.notNull(['Mean_SAVI']));
+
+print('Seasonal SAVI (2014–2024)', seasonalSAVI.limit(10));
+
+// ------------------------------
+// 8. Chart
+// ------------------------------
+var chart = ui.Chart.feature.groups({
+  features: seasonalSAVI,
+  xProperty: 'Season',
+  yProperty: 'Mean_SAVI',
+  seriesProperty: 'Year'
+}).setChartType('LineChart')
+  .setOptions({
+    title: 'Seasonal SAVI (2014–2024, Landsat 8 & 9)',
+    hAxis: {title: 'Season'},
+    vAxis: {title: 'Mean SAVI'},
+    pointSize: 4,
+    lineWidth: 2,
+    legend: {position: 'right'}
+  });
+
+print(chart);
+
+// ------------------------------
+// 9. Export
+// ------------------------------
+Export.table.toDrive({
+  collection: seasonalSAVI,
+  description: 'Seasonal_SAVI_2014_2024_L89',
+  folder: 'GEE_Exports',
+  fileFormat: 'CSV'
+});
