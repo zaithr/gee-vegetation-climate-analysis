@@ -6,7 +6,6 @@ This project presents a comprehensive geospatial analysis of vegetation dynamics
 
 The workflow combines remote sensing, spatial analysis, and time-series modeling to generate consistent seasonal datasets for vegetation indices (NDVI, SAVI), temperature, and precipitation.
 
----
 
 ## Objectives
 
