@@ -1,4 +1,4 @@
-# 🌍 Multi-Temporal Vegetation, Temperature, and Rainfall Analysis (1988–2024)
+🌍 Multi-Temporal Vegetation, Temperature, and Rainfall Analysis (1988–2024)
 
 ## Overview
 
