@@ -14,7 +14,7 @@ The workflow combines remote sensing, spatial analysis, and time-series modeling
 * Assess rainfall patterns and their relationship with vegetation dynamics
 * Develop a consistent multi-decadal geospatial analysis framework
 
----
+-
 
 ## Study Area
 
